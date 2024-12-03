@@ -2,12 +2,13 @@ import os
 import logging
 import requests
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
 from telegram.ext import Application, CommandHandler
 from dotenv import load_dotenv
 from functools import wraps
 import signal
 import sys
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 import aiohttp
@@ -31,6 +32,7 @@ class Config:
     TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
     CACHE_TIMEOUT = 35  # minutes
     API_RATE_LIMIT_DELAY = 1  # seconds
+    VERSION = "1.0.0"
 
 # Cache manager
 class CacheManager:
@@ -64,7 +66,8 @@ def make_coingecko_request(endpoint, params=None):
             params=params,
             timeout=10
         )
-        time.sleep(Config.API_RATE_LIMIT_DELAY)
+        import time as time_module
+        time_module.sleep(Config.API_RATE_LIMIT_DELAY)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
@@ -265,10 +268,13 @@ async def monitor_changes(context):
         cache_manager.last_state = is_alt_season
         return
 
-    # Check for changes in individual conditions
+    # Check for significant changes in individual conditions
     changed_conditions = []
     for name, (is_met, value, target) in current_conditions.items():
         last_met = cache_manager.last_conditions[name][0]
+        last_value = cache_manager.last_conditions[name][1]
+        
+        # Only alert if condition status changed (true->false or false->true)
         if last_met != is_met:
             status_emoji = "✅" if is_met else "❌"
             changed_conditions.append(
@@ -276,7 +282,7 @@ async def monitor_changes(context):
                 f"Current value: {value:.2f}"
             )
 
-    # Send alerts for changed conditions
+    # Send alerts only if there are actual changes
     if changed_conditions:
         alert_message = "⚠️ Indicator Changes Detected!\n\n" + "\n\n".join(changed_conditions)
         await context.bot.send_message(
@@ -303,7 +309,11 @@ async def send_bot_status(application, status="start"):
     status_text = "Online" if status == "start" else "Offline"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     
-    message = f"{emoji} Bot {status_text}\n⏰ {timestamp}"
+    message = (
+        f"{emoji} Bot {status_text}\n"
+        f"📊 Version: {Config.VERSION}\n"
+        f"⏰ {timestamp}"
+    )
     
     try:
         await application.bot.send_message(
@@ -450,7 +460,7 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    global application  # Make application global so signal handler can access it
+    global application
     
     # Create application
     application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
@@ -463,28 +473,25 @@ def main():
     # Add jobs
     job_queue = application.job_queue
     
-    # Daily update at 00:00 UTC
+    # Daily update at 8:00 AM EST (13:00 UTC)
     job_queue.run_daily(
         send_daily_update, 
-        time=datetime.time(hour=0, minute=0, tzinfo=timezone.utc)
+        time=time(hour=13, minute=0, tzinfo=timezone.utc)
     )
     
-    # Check for changes every 35 minutes
+    # Check for changes every hour (instead of 35 minutes)
     job_queue.run_repeating(
         monitor_changes, 
-        interval=timedelta(minutes=35),
-        first=1  # Start first check after 1 second
+        interval=timedelta(hours=1),
+        first=60  # Start first check after 60 seconds
     )
 
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Send startup notification only
+    async def startup(context):
+        await send_bot_status(application, "start")
 
-    # Send startup notification
-    application.job_queue.run_once(
-        lambda ctx: send_bot_status(application, "start"),
-        when=1  # Send after 1 second
-    )
+    # Run startup task after a short delay
+    job_queue.run_once(startup, when=5)  # Run after 5 seconds
 
     # Start the bot
     application.run_polling()

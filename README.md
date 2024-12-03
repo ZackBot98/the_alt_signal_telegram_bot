@@ -1,5 +1,7 @@
 # Alt Season Indicators Telegram Bot
 
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+
 A Telegram bot that monitors and alerts on various cryptocurrency market indicators to determine if we're in an "alt season" - a period when altcoins significantly outperform Bitcoin.
 
 ## Features
