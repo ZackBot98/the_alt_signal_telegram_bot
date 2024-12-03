@@ -4,13 +4,17 @@
 
 A Telegram bot that monitors and alerts on various cryptocurrency market indicators to determine if we're in an "alt season" - a period when altcoins significantly outperform Bitcoin.
 
+## Timing and Intervals
+
+- Daily Update: 8:00 AM EST (13:00 UTC)
+- Indicator Checks: Every hour
+- Startup Sequence:
+  1. Bot startup message (5 seconds after launch)
+  2. First indicator check (60 seconds after launch)
+  3. Regular hourly checks begin
+
 ## Features
 
-- Real-time market monitoring via CoinGecko API
-- Daily status updates at 00:00 UTC
-- Instant alerts on indicator changes
-- Website status monitoring and manual updates
-- Multiple indicator tracking:
   - Bitcoin Dominance
   - ETH/BTC Ratio
   - Fear & Greed Index
