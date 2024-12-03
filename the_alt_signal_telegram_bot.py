@@ -12,6 +12,8 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 import aiohttp
+from telegram.error import TimedOut, NetworkError, RetryAfter
+import backoff
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +35,10 @@ class Config:
     CACHE_TIMEOUT = 35  # minutes
     API_RATE_LIMIT_DELAY = 1  # seconds
     VERSION = "1.0.0"
+    MAX_RETRIES = 3
+    INITIAL_RETRY_DELAY = 5
+    MAX_RETRY_DELAY = 30
+    NETWORK_TIMEOUT = 30
 
 # Cache manager
 class CacheManager:
@@ -233,15 +239,13 @@ async def check_indicators():
         # Create status message
         message = "🔄 Alt Season Indicators Update\n\n"
         message += f"{'🚀 Alt Season Likely!' if is_alt_season else '⏳ Not Alt Season Yet'}\n\n"
-        
-        # Count met conditions
-        met_conditions = sum(1 for condition in conditions.values() if condition[0])
-        message += f"✨ {met_conditions}/6 Conditions Met\n\n"
-        
-        # Add individual indicators
+        message += f"✨ {sum(1 for condition in conditions.values() if condition[0])}/6 Conditions Met\n\n"
         message += "📊 Current Indicators:\n"
         for name, (is_met, value, target) in conditions.items():
             message += f"• {name}: {value:.2f} {'✅' if is_met else '❌'} (Target: {target})\n"
+        
+        # Add website link
+        message += "\n📈 View detailed charts and analysis at https://www.thealtsignal.com"
 
         return message, is_alt_season, conditions
 
@@ -254,8 +258,7 @@ async def send_daily_update(context):
     message, _, _ = await check_indicators()
     await context.bot.send_message(
         chat_id=Config.TELEGRAM_CHAT_ID,
-        text=message,
-        parse_mode='HTML'
+        text=message
     )
 
 async def monitor_changes(context):
@@ -268,35 +271,31 @@ async def monitor_changes(context):
         cache_manager.last_state = is_alt_season
         return
 
-    # Check for significant changes in individual conditions
+    # Check for changes in individual conditions
     changed_conditions = []
     for name, (is_met, value, target) in current_conditions.items():
         last_met = cache_manager.last_conditions[name][0]
-        last_value = cache_manager.last_conditions[name][1]
-        
-        # Only alert if condition status changed (true->false or false->true)
         if last_met != is_met:
             status_emoji = "✅" if is_met else "❌"
             changed_conditions.append(
-                f"{status_emoji} {name} {'now meets' if is_met else 'no longer meets'} target {target}\n"
+                f"{status_emoji} {name} "
+                f"{'now meets' if is_met else 'no longer meets'} target {target}\n"
                 f"Current value: {value:.2f}"
             )
 
-    # Send alerts only if there are actual changes
+    # Send alerts for changed conditions
     if changed_conditions:
         alert_message = "⚠️ Indicator Changes Detected!\n\n" + "\n\n".join(changed_conditions)
         await context.bot.send_message(
             chat_id=Config.TELEGRAM_CHAT_ID,
-            text=alert_message,
-            parse_mode='HTML'
+            text=alert_message
         )
 
     # Check for alt season status change
     if cache_manager.last_state != is_alt_season:
         await context.bot.send_message(
             chat_id=Config.TELEGRAM_CHAT_ID,
-            text=f"🚨 Alt Season Status Change!\n\n{message}",
-            parse_mode='HTML'
+            text=f"🚨 Alt Season Status Change!\n\n{message}"
         )
 
     # Update cached states
@@ -334,6 +333,9 @@ def signal_handler(signum, frame):
     try:
         # Send offline notification
         loop.run_until_complete(send_bot_status(application, "stop"))
+        logger.info("Shutdown message sent successfully")
+    except Exception as e:
+        logger.error(f"Error sending shutdown message: {e}")
     finally:
         loop.close()
         sys.exit(0)
@@ -364,7 +366,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Send initial message
-    status_message = await update.message.reply_text("🔍 Checking website status...")
+    status_message = await update.message.reply_text("🔍 <i>Checking website status...</i>")
     
     # Check website status
     is_up, status_code, response_time = await check_website_status()
@@ -372,15 +374,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_up:
         message = (
             "✅ Website Status Check\n\n"
-            f"🌐 https://www.thealtsignal.com\n"
+            f"🌐 <a href='https://www.thealtsignal.com'>thealtsignal.com</a>\n"
             f"📊 Status Code: {status_code}\n"
             f"⚡ Response Time: {response_time:.2f}s"
         )
     else:
         message = (
             "❌ Website Status Check\n\n"
-            f"🌐 https://www.thealtsignal.com\n"
-            f"⚠️ Status: {'Unreachable' if status_code is None else f'Error {status_code}'}"
+            f"🌐 <a href='https://www.thealtsignal.com'>thealtsignal.com</a>\n"
+            f"⚠️ Status: {status_code if status_code is not None else 'Unreachable'}"
         )
     
     # Update the status message
@@ -462,8 +464,22 @@ def main():
     """Start the bot"""
     global application
     
-    # Create application
-    application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+    # Create application with custom settings
+    application = (
+        Application.builder()
+        .token(Config.TELEGRAM_BOT_TOKEN)
+        .connect_timeout(Config.NETWORK_TIMEOUT)
+        .read_timeout(Config.NETWORK_TIMEOUT)
+        .write_timeout(Config.NETWORK_TIMEOUT)
+        .get_updates_connect_timeout(Config.NETWORK_TIMEOUT)
+        .get_updates_read_timeout(Config.NETWORK_TIMEOUT)
+        .get_updates_write_timeout(Config.NETWORK_TIMEOUT)
+        .build()
+    )
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Docker stop
 
     # Add command handlers
     application.add_handler(CommandHandler('status', status_command))
@@ -479,19 +495,31 @@ def main():
         time=time(hour=13, minute=0, tzinfo=timezone.utc)
     )
     
-    # Check for changes every hour (instead of 35 minutes)
+    # Check for changes every hour
     job_queue.run_repeating(
         monitor_changes, 
         interval=timedelta(hours=1),
         first=60  # Start first check after 60 seconds
     )
 
-    # Send startup notification only
-    async def startup(context):
+    # Combined startup sequence
+    async def startup_sequence(context):
+        """Run startup sequence with status and initial check"""
+        # Send startup message
         await send_bot_status(application, "start")
+        
+        # Wait 5 seconds
+        await asyncio.sleep(5)
+        
+        # Do initial indicator check
+        message, _, _ = await check_indicators()
+        await context.bot.send_message(
+            chat_id=Config.TELEGRAM_CHAT_ID,
+            text=message
+        )
 
-    # Run startup task after a short delay
-    job_queue.run_once(startup, when=5)  # Run after 5 seconds
+    # Run startup sequence
+    job_queue.run_once(startup_sequence, when=1)
 
     # Start the bot
     application.run_polling()

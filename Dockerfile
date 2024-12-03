@@ -11,6 +11,7 @@ RUN mkdir -p /app/logs
 RUN apt-get update && apt-get install -y \
     gcc \
     python3-dev \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache
@@ -27,13 +28,13 @@ COPY .env .
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONIOENCODING=UTF-8
+ENV TINI_SUBREAPER=true
 
 # Use tini as init system
-RUN apt-get update && apt-get install -y tini && rm -rf /var/lib/apt/lists/*
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
 # Create volume for logs
 VOLUME ["/app/logs"]
 
-# Run the bot with logging
-CMD ["python", "-u", "the_alt_signal_telegram_bot.py"] > /app/logs/bot.log 2>&1 
+# Run the bot
+CMD ["python", "-u", "the_alt_signal_telegram_bot.py"]
